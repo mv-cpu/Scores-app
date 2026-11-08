@@ -130,8 +130,8 @@ async function addFiles(files) {
       n++;
     } catch (e) { $("msg").textContent = `${f.name}: ${e.message}`; }
   }
+  await showLibrary();
   if (n) $("msg").textContent = `Added ${n} song(s). They work offline now.`;
-  showLibrary();
 }
 async function showLibrary() {
   $("player").style.display = "none"; $("libview").style.display = "block";

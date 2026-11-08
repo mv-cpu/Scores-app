@@ -1,6 +1,6 @@
 // status 150: keeps the offline viewer on the device. Songs are NOT here: they live in the app's own storage (IndexedDB).
 // Bump CACHE when the app changes, so the iPad picks up the new version the next time it is online.
-const CACHE = "scores-v2";
+const CACHE = "scores-v3";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-512.png",
   "alphatab/alphaTab.min.js", "alphatab/soundfont/sonivox.sf2",
   "alphatab/font/Bravura.woff2", "alphatab/font/Bravura.woff"];
