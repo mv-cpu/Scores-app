@@ -89,7 +89,6 @@
     <button id="more">Controls</button>
   </div>
 </div>
-<audio id="audio" preload="auto" playsinline></audio>
 
 <script src="alphatab/alphaTab.min.js"></script>
 <script>
@@ -124,9 +123,12 @@ async function addFiles(files) {
       const p = JSON.parse(await f.text());
       if (p.format !== "scorepack") throw new Error("not a song package");
       const id = p.title + (p.variant ? "_" + p.variant : "");
-      const audio = p.audio ? await (await fetch(`data:${p.audio.mime};base64,${p.audio.base64}`)).blob() : null;
+      const blob = async (a) => (await fetch(`data:${a.mime};base64,${a.base64}`)).blob();
+      const audio = p.audio ? await blob(p.audio) : null;
+      const stems = {};                                    // the separated parts (guitar, bass, drums...) for solo / mute
+      for (const [k, v] of Object.entries(p.stems || {})) stems[k] = await blob(v);
       await tx("songs", "readwrite", (s) => s.put({ id, title: p.title, variant: p.variant, source: p.source, exported: p.exported,
-        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio }));
+        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio, stems }));
       n++;
     } catch (e) { $("msg").textContent = `${f.name}: ${e.message}`; }
   }
@@ -138,7 +140,7 @@ async function showLibrary() {
   const songs = (await allOf("songs")).sort((a, b) => a.title.localeCompare(b.title));
   const notes = await allOf("notes");
   $("songs").innerHTML = songs.map((s) => `<div class="song"><div class="t" data-id="${esc(s.id)}"><b>${esc(s.title)}${s.variant ? " (" + esc(s.variant) + ")" : ""}</b>
-      <span class="muted">${Math.round(s.tempo || 0)} BPM · ${esc(s.tunings?.guitar || "")} · exported ${esc((s.exported || "").slice(0, 10))}${s.audio ? "" : " · no recording"}</span></div>
+      <span class="muted">${Math.round(s.tempo || 0)} BPM · ${esc(s.tunings?.guitar || "")} · exported ${esc((s.exported || "").slice(0, 10))}${s.audio ? "" : " · no recording"}${s.stems && Object.keys(s.stems).length ? " · parts" : ""}</span></div>
       <button data-del="${esc(s.id)}" title="Remove from this device">✕</button></div>`).join("")
     || `<p class="muted">No songs yet.</p>`;
   $("sendnotes").textContent = `Send notes to the laptop (${notes.length})`;
@@ -164,10 +166,42 @@ $("sendnotes").onclick = async () => {
 };
 
 // ------------------------------------------------------------------ player
-let api = null, cur = null, sync = [], posTimer = 0, sel = null, audioUrl = null;
-const audio = $("audio");
+let api = null, cur = null, sync = [], posTimer = 0, sel = null, urls = [], loopA = null, loopB = null;
 const atUrl = (p) => new URL("alphatab/" + p, location.href).href;
 function role(t) { const r = ROLE_COLORS.find(([re]) => re.test(t.name)); const drum = t.staves.some((s) => s.isPercussion); return drum ? ["D", "#dc2626"] : [r[1], r[2]]; }
+const STEM_ROLE = { guitar: ["Guitars", "G", "#2563eb"], bass: ["Bass", "B", "#9333ea"], drums: ["Drums", "D", "#dc2626"],
+                    vocals: ["Vocals", "V", "#db2777"], piano: ["Piano / keys", "K", "#64748b"], other: ["Other", "O", "#0d9488"] };
+
+// The recording plays from a GROUP of audio elements: every separated part at once (so each can be muted or soloed),
+// or the full mix when the package has no parts. The first element leads; the others follow it (re-synced when they
+// drift more than 60 ms).
+const media = {
+  els: [], names: [], syncer: 0,
+  get lead() { return this.els[0]; },
+  load(c) {
+    this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.els = []; this.names = [];
+    const parts = Object.entries(c.stems || {});
+    const srcs = parts.length ? parts : (c.audio ? [["mix", c.audio]] : []);
+    for (const [name, blob] of srcs) {
+      const a = new Audio(); const u = URL.createObjectURL(blob); urls.push(u);
+      a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true;
+      this.els.push(a); this.names.push(name);
+    }
+    clearInterval(this.syncer);
+    this.syncer = setInterval(() => {
+      const L = this.lead; if (!L || L.paused) return;
+      for (const a of this.els.slice(1)) if (Math.abs(a.currentTime - L.currentTime) > 0.06) a.currentTime = L.currentTime;
+    }, 250);
+  },
+  get has() { return this.els.length > 0; },
+  get paused() { return !this.lead || this.lead.paused; },
+  get currentTime() { return this.lead ? this.lead.currentTime : 0; },
+  set currentTime(v) { this.els.forEach((a) => a.currentTime = v); },
+  get duration() { return this.lead ? this.lead.duration : NaN; },
+  set rate(v) { this.els.forEach((a) => { a.preservesPitch = true; a.playbackRate = v; }); },
+  play() { const t = this.currentTime; this.els.forEach((a) => { a.currentTime = t; a.play().catch(() => {}); }); },
+  pause() { this.els.forEach((a) => a.pause()); },
+};
 
 async function openSong(id) {
   cur = await tx("songs", "readonly", (s) => s.get(id));
@@ -175,12 +209,10 @@ async function openSong(id) {
   $("libview").style.display = "none"; $("player").style.display = "flex";
   $("ptitle").textContent = cur.title + (cur.variant ? ` (${cur.variant})` : "");
   sync = cur.syncPoints || [];
-  if (audioUrl) URL.revokeObjectURL(audioUrl);
-  audioUrl = cur.audio ? URL.createObjectURL(cur.audio) : null;
-  audio.src = audioUrl || "";
-  $("mode").value = cur.audio ? "original" : "synth";
-  $("mode").querySelector('[value="original"]').disabled = !cur.audio;
-  sel = null; renderNotes();
+  media.load(cur);
+  $("mode").value = media.has ? "original" : "synth";
+  $("mode").querySelector('[value="original"]').disabled = !media.has;
+  sel = null; clearLoop(); renderNotes();
   await createApi();
 }
 async function createApi() {
@@ -207,10 +239,14 @@ async function createApi() {
     buildTracks(score);
   });
   api.renderFinished.on(() => $("pstatus").textContent = `${api.score.masterBars.length} bars`);
-  api.playerReady.on(() => { $("play").disabled = false; $("stop").disabled = false; try { api.updateSyncPoints(); } catch (e) {} applySpeed(); });
+  api.playerReady.on(() => { $("play").disabled = false; $("stop").disabled = false; try { api.updateSyncPoints(); } catch (e) {} applySpeed(); applyLoop(); });
   api.playerStateChanged.on((e) => { if (!original) $("play").textContent = e.state === 1 ? "Pause" : "Play"; });
   api.beatMouseDown.on((beat) => {
-    try { sel = { bar: beat.voice.bar.index + 1, part: beat.voice.bar.staff.track.name }; $("notewhat").textContent = `Note on bar ${sel.bar} · ${sel.part}`; } catch (e) {}
+    try {
+      sel = { bar: beat.voice.bar.index + 1, part: beat.voice.bar.staff.track.name };
+      $("notewhat").textContent = `Note on bar ${sel.bar} · ${sel.part}`;
+      if (loopA !== null && loopB === null) { loopB = Math.max(loopA, sel.bar - 1); applyLoop(); }   // the loop's last bar
+    } catch (e) {}
   });
   api.error.on((e) => $("pstatus").textContent = "error: " + (e?.message || e));
   if (original) hookAudio();
@@ -220,47 +256,94 @@ async function createApi() {
 function hookAudio() {
   const out = () => api.player && api.player.output;
   const handler = {
-    get backingTrackDuration() { const d = audio.duration; return Number.isFinite(d) ? d * 1000 : 0; },
-    get playbackRate() { return audio.playbackRate; }, set playbackRate(v) { audio.playbackRate = v; },
-    get masterVolume() { return audio.volume; }, set masterVolume(v) { audio.volume = v; },
-    seekTo(ms) { audio.currentTime = ms / 1000; }, play() { audio.play(); }, pause() { audio.pause(); },
+    get backingTrackDuration() { const d = media.duration; return Number.isFinite(d) ? d * 1000 : 0; },
+    get playbackRate() { return media.lead ? media.lead.playbackRate : 1; }, set playbackRate(v) { media.rate = v; },
+    get masterVolume() { return 1; }, set masterVolume(v) {},
+    seekTo(ms) { media.currentTime = ms / 1000; }, play() { media.play(); }, pause() { media.pause(); },
   };
   const attach = () => { if (out()) out().handler = handler; };
   api.playerReady.on(attach); attach();
-  const tick = () => { if (out() && out().updatePosition) out().updatePosition(audio.currentTime * 1000); };
-  audio.onplay = () => { clearInterval(posTimer); api.play(); posTimer = setInterval(tick, 50); $("play").textContent = "Pause"; };
-  audio.onpause = audio.onended = () => { clearInterval(posTimer); api.pause(); $("play").textContent = "Play"; };
-  audio.onseeked = tick; audio.ontimeupdate = tick;
+  const tick = () => {
+    const end = loopEndMs();
+    if (end !== null && media.currentTime * 1000 >= end) media.currentTime = loopStartMs() / 1000;   // the bar loop
+    if (out() && out().updatePosition) out().updatePosition(media.currentTime * 1000);
+  };
+  const L = media.lead; if (!L) return;
+  L.onplay = () => { clearInterval(posTimer); api.play(); posTimer = setInterval(tick, 40); $("play").textContent = "Pause"; };
+  L.onpause = L.onended = () => { clearInterval(posTimer); api.pause(); $("play").textContent = "Play"; };
+  L.onseeked = tick; L.ontimeupdate = tick;
 }
 function applySpeed() {
   const v = Number($("speed").value) / 100;
   if (api) api.playbackSpeed = v;
-  audio.preservesPitch = true; audio.playbackRate = v;
+  media.rate = v;
 }
+
+// ---- loop: tap a bar, tap Loop, then tap the last bar (tap Loop again = off). Whole bars, from the bar timings.
+function loopStartMs() { return loopA !== null && loopB !== null && sync[loopA] ? sync[loopA].ms : null; }
+function loopEndMs() {
+  if (loopA === null || loopB === null) return null;
+  if (sync[loopB + 1]) return sync[loopB + 1].ms;
+  const sp = sync[loopB]; return sp ? sp.ms + 4 * 60000 / (sp.bpm || 120) : null;
+}
+function applyLoop() {
+  const btn = $("loop");
+  if (loopA === null) { btn.textContent = "Loop"; btn.classList.remove("primary"); return; }
+  if (loopB === null) { btn.textContent = `Loop from bar ${loopA + 1}: tap the last bar`; btn.classList.add("primary"); return; }
+  btn.textContent = `Looping bars ${loopA + 1}–${loopB + 1} ✕`; btn.classList.add("primary");
+  if (!api || !api.score) return;
+  const mbs = api.score.masterBars, a = mbs[loopA], b = mbs[loopB];
+  if ($("mode").value !== "original" && a && b) {          // the synth loops by itself
+    api.playbackRange = { startTick: a.start, endTick: b.start + b.calculateDuration() }; api.isLooping = true;
+    api.tickPosition = a.start;
+  } else if (loopStartMs() !== null) {
+    media.currentTime = loopStartMs() / 1000;
+  }
+}
+function clearLoop() { loopA = loopB = null; if (api) { api.isLooping = false; api.playbackRange = null; } applyLoop(); }
+$("loop").onclick = () => {
+  if (loopA !== null) { clearLoop(); return; }
+  if (!sel) { $("pstatus").textContent = "Tap the first bar of the loop, then Loop"; return; }
+  loopA = sel.bar - 1; loopB = null; applyLoop();
+};
+
+// ---- the parts: in Recording, mute / solo the separated parts; in Synth, mute / solo the score's tracks
 function buildTracks(score) {
   const original = $("mode").value === "original";
   $("show").innerHTML = '<option value="all">All parts</option>' + score.tracks.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
-  $("tracks").innerHTML = score.tracks.map((t, i) => { const [l, c] = role(t); return `<div class="track" style="--tc:${c}" data-i="${i}">
-    <span><span class="tdot">${l}</span>${esc(t.name)}</span>
-    <button class="m" ${original ? "disabled" : ""}>M</button><button class="s" ${original ? "disabled" : ""}>S</button></div>`; }).join("")
-    + (original ? `<p class="muted" style="font-size:13px">Mute / solo work in Synth sound.</p>` : "");
+  if (original) {
+    const parts = media.names.filter((n) => STEM_ROLE[n]);
+    $("tracks").innerHTML = parts.length ? parts.map((n) => { const [label, l, c] = STEM_ROLE[n];
+      return `<div class="track" style="--tc:${c}" data-stem="${n}"><span><span class="tdot">${l}</span>${label}</span><button class="m">M</button><button class="s">S</button></div>`; }).join("")
+      : `<p class="muted" style="font-size:13px">This song was exported without its separated parts: mute / solo work in Synth sound. Re-export it on the laptop to get them.</p>`;
+  } else {
+    $("tracks").innerHTML = score.tracks.map((t, i) => { const [l, c] = role(t); return `<div class="track" style="--tc:${c}" data-i="${i}">
+      <span><span class="tdot">${l}</span>${esc(t.name)}</span><button class="m">M</button><button class="s">S</button></div>`; }).join("");
+  }
   document.querySelectorAll(".track button").forEach((b) => b.onclick = () => { b.classList.toggle("on"); muteSolo(); });
 }
 function muteSolo() {
   const rows = [...document.querySelectorAll(".track")];
   const solo = rows.some((r) => r.querySelector(".s").classList.contains("on"));
-  rows.forEach((r) => { const t = api.score.tracks[Number(r.dataset.i)];
-    const off = r.querySelector(".m").classList.contains("on") || (solo && !r.querySelector(".s").classList.contains("on"));
-    api.changeTrackMute([t], off); });
+  const off = (r) => r.querySelector(".m").classList.contains("on") || (solo && !r.querySelector(".s").classList.contains("on"));
+  rows.forEach((r) => {
+    if (r.dataset.stem) { const a = media.els[media.names.indexOf(r.dataset.stem)]; if (a) a.muted = off(r); }
+    else api.changeTrackMute([api.score.tracks[Number(r.dataset.i)]], off(r));
+  });
 }
 $("show").onchange = () => { const t = api.score.tracks[Number($("show").value)]; api.renderTracks(t ? [t] : api.score.tracks); };
-$("mode").onchange = () => { audio.pause(); createApi(); };
+$("mode").onchange = () => { media.pause(); createApi(); };
 $("speed").onchange = applySpeed;
-$("play").onclick = () => { if ($("mode").value === "original") (audio.paused ? audio.play() : audio.pause()); else api.playPause(); };
-$("stop").onclick = () => { if ($("mode").value === "original") { audio.pause(); audio.currentTime = 0; } api.stop(); };
-$("loop").onclick = (e) => { api.isLooping = !api.isLooping; e.target.classList.toggle("primary", api.isLooping); };
+$("play").onclick = () => {
+  if ($("mode").value === "original") {
+    const s0 = loopStartMs(), e0 = loopEndMs(), now = media.currentTime * 1000;
+    if (media.paused && s0 !== null && (now < s0 || now >= e0)) media.currentTime = s0 / 1000;   // start inside the loop
+    media.paused ? media.play() : media.pause();
+  } else api.playPause();
+};
+$("stop").onclick = () => { if ($("mode").value === "original") { media.pause(); media.currentTime = loopStartMs() !== null ? loopStartMs() / 1000 : 0; } api.stop(); };
 $("more").onclick = () => { const o = $("panel").classList.toggle("open"); $("more").textContent = o ? "Hide" : "Controls"; };
-$("back").onclick = () => { audio.pause(); if (api) { api.destroy(); api = null; } showLibrary(); };
+$("back").onclick = () => { media.pause(); if (api) { api.destroy(); api = null; } showLibrary(); };
 
 // notes (kept here until "Send notes to the laptop")
 $("presets").innerHTML = PRESETS.map((p) => `<button data-p="${p}">${p}</button>`).join("");
