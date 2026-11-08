@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Scores">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>Scores</title>
+<style>
+  /* status 150: the offline viewer. Songs come from .scorepack.json files (made on the laptop: "Export for iPad"),
+     opened from the Files app and kept on this device. No server, no internet after the first visit. */
+  :root { --bg:#0f172a; --panel:#111c33; --line:#26324a; --fg:#e2e8f0; --muted:#94a3b8; --accent:#f59e0b; --paper:#ffffff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f1f5f9; --panel:#ffffff; --line:#d7dee8; --fg:#0f172a; --muted:#475569; } }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:16px/1.4 -apple-system, system-ui, sans-serif; }
+  button, select, input { font:inherit; }
+  button { background:var(--line); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 14px; min-height:44px; cursor:pointer; }
+  button.primary { background:var(--accent); color:#111; border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.45; }
+  select, input[type=text] { min-height:44px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); padding:6px 10px; }
+  .muted { color:var(--muted); }
+  header { display:flex; gap:10px; align-items:center; padding:calc(8px + env(safe-area-inset-top)) 14px 8px; background:var(--panel);
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:18px; margin:0; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #library { padding:14px; max-width:820px; margin:0 auto; }
+  .song { display:flex; align-items:center; gap:10px; padding:12px; border:1px solid var(--line); border-radius:10px; margin:8px 0; background:var(--panel); }
+  .song .t { flex:1; cursor:pointer; } .song .t b { display:block; }
+  #player { display:none; flex-direction:column; height:100%; }
+  #main { flex:1; overflow:auto; background:var(--paper); position:relative; -webkit-overflow-scrolling:touch; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px calc(8px + env(safe-area-inset-bottom)); background:var(--panel);
+         border-top:1px solid var(--line); flex-wrap:wrap; }
+  #panel { display:none; padding:12px; background:var(--panel); border-top:1px solid var(--line); max-height:45vh; overflow:auto; }
+  #panel.open { display:block; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .track { display:flex; align-items:center; gap:8px; margin:4px 0; padding-left:8px; border-left:4px solid var(--tc, var(--line)); }
+  .track span { flex:1; }
+  .track button.on { background:var(--accent); color:#111; }
+  .tdot { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:var(--tc);
+          color:#fff; font:700 11px/1 system-ui; text-shadow:0 0 2px rgba(0,0,0,.6); margin-right:6px; }
+  #notelist li { margin:4px 0; } #notelist { padding-left:18px; margin:4px 0; }
+  .at-cursor-bar { background:rgba(245,158,11,.12); } .at-cursor-beat { background:rgba(245,158,11,.75); width:3px; }
+  .at-selection div { background:rgba(56,189,248,.25); }
+  #msg { font-size:13px; }
+</style>
+</head>
+<body>
+<div id="libview">
+  <header><h1>Scores</h1><span id="online" class="muted" style="font-size:12px"></span></header>
+  <div id="library">
+    <div class="row">
+      <label class="primary" style="display:inline-block"><button class="primary" id="addbtn">Add song…</button>
+        <input type="file" id="file" accept=".json,application/json" multiple style="display:none"></label>
+      <button id="sendnotes">Send notes to the laptop</button>
+    </div>
+    <p id="msg" class="muted">Songs are kept on this device. Add a <b>.scorepack.json</b> from the Files app (e.g. Dropbox › iPad Songs).</p>
+    <div id="songs"></div>
+  </div>
+</div>
+
+<div id="player">
+  <header><button id="back">‹ Songs</button><h1 id="ptitle"></h1><span id="pstatus" class="muted" style="font-size:12px"></span></header>
+  <div id="main"><div id="at"></div></div>
+  <div id="panel">
+    <div class="row"><span class="muted">Sound</span>
+      <select id="mode"><option value="original">Recording</option><option value="synth">Synth (score)</option></select>
+      <span class="muted">Speed</span>
+      <select id="speed"><option>50</option><option>60</option><option>70</option><option>80</option><option>90</option><option selected>100</option></select>%
+    </div>
+    <div class="row"><span class="muted">Show</span><select id="show" style="flex:1;min-width:0"><option value="all">All parts</option></select></div>
+    <div id="tracks"></div>
+    <div id="notebox">
+      <h3 style="margin:12px 0 4px">Note for Claude</h3>
+      <div id="notewhat" class="muted">Tap a note in the score first.</div>
+      <div class="row" id="presets"></div>
+      <div class="row"><input type="text" id="notetext" maxlength="300" placeholder="your note" style="flex:1;min-width:0"><button id="notesave" class="primary">Save</button></div>
+      <ul id="notelist"></ul>
+    </div>
+  </div>
+  <div id="bar">
+    <button id="play" class="primary" disabled>Play</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="loop" title="Loop the bars you selected (drag on the score)">Loop</button>
+    <span style="flex:1"></span>
+    <button id="more">Controls</button>
+  </div>
+</div>
+<audio id="audio" preload="auto" playsinline></audio>
+
+<script src="alphatab/alphaTab.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ROLE_COLORS = [[/^other/i, "O", "#0d9488"], [/acoustic/i, "A", "#ea580c"], [/lead|solo/i, "L", "#16a34a"], [/harmony|second|2nd/i, "H", "#ca8a04"],
+  [/bass/i, "B", "#9333ea"], [/drum|perc/i, "D", "#dc2626"], [/vocal|voice|melody/i, "V", "#db2777"],
+  [/piano|keys|organ|synth/i, "K", "#64748b"], [/rhythm|guitar/i, "R", "#2563eb"], [/./, "O", "#0d9488"]];
+const PRESETS = ["wrong note", "sounds late", "sounds early", "missing notes", "too many notes", "this is a power chord", "wrong chord", "should be silent"];
+
+// ------------------------------------------------------------------ storage (IndexedDB: songs + notes, on this device)
+let dbp = null;
+function db() {
+  return dbp || (dbp = new Promise((ok, bad) => {
+    const r = indexedDB.open("scores", 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore("songs", { keyPath: "id" }); r.result.createObjectStore("notes", { keyPath: "id", autoIncrement: true }); };
+    r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
+  }));
+}
+async function tx(store, mode, fn) {
+  const d = await db();
+  return new Promise((ok, bad) => { const t = d.transaction(store, mode); const s = t.objectStore(store); const r = fn(s);
+    t.oncomplete = () => ok(r && r.result); t.onerror = () => bad(t.error); });
+}
+const allOf = (store) => tx(store, "readonly", (s) => s.getAll());
+
+// ------------------------------------------------------------------ library
+async function addFiles(files) {
+  let n = 0;
+  for (const f of files) {
+    try {
+      const p = JSON.parse(await f.text());
+      if (p.format !== "scorepack") throw new Error("not a song package");
+      const id = p.title + (p.variant ? "_" + p.variant : "");
+      const audio = p.audio ? await (await fetch(`data:${p.audio.mime};base64,${p.audio.base64}`)).blob() : null;
+      await tx("songs", "readwrite", (s) => s.put({ id, title: p.title, variant: p.variant, source: p.source, exported: p.exported,
+        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio }));
+      n++;
+    } catch (e) { $("msg").textContent = `${f.name}: ${e.message}`; }
+  }
+  if (n) $("msg").textContent = `Added ${n} song(s). They work offline now.`;
+  showLibrary();
+}
+async function showLibrary() {
+  $("player").style.display = "none"; $("libview").style.display = "block";
+  const songs = (await allOf("songs")).sort((a, b) => a.title.localeCompare(b.title));
+  const notes = await allOf("notes");
+  $("songs").innerHTML = songs.map((s) => `<div class="song"><div class="t" data-id="${esc(s.id)}"><b>${esc(s.title)}${s.variant ? " (" + esc(s.variant) + ")" : ""}</b>
+      <span class="muted">${Math.round(s.tempo || 0)} BPM · ${esc(s.tunings?.guitar || "")} · exported ${esc((s.exported || "").slice(0, 10))}${s.audio ? "" : " · no recording"}</span></div>
+      <button data-del="${esc(s.id)}" title="Remove from this device">✕</button></div>`).join("")
+    || `<p class="muted">No songs yet.</p>`;
+  $("sendnotes").textContent = `Send notes to the laptop (${notes.length})`;
+  $("sendnotes").disabled = !notes.length;
+  document.querySelectorAll(".song .t").forEach((el) => el.onclick = () => openSong(el.dataset.id));
+  document.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Remove this song from the iPad? (Your laptop and Dropbox keep it.)")) return;
+    await tx("songs", "readwrite", (s) => s.delete(b.dataset.del)); showLibrary();
+  });
+}
+$("addbtn").onclick = () => $("file").click();
+$("file").onchange = (e) => addFiles([...e.target.files]);
+$("sendnotes").onclick = async () => {
+  const notes = await allOf("notes");
+  const body = JSON.stringify({ format: "scorepack-notes", sent: new Date().toISOString(), notes }, null, 1);
+  const name = `notes_ipad_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`;
+  const file = new File([body], name, { type: "application/json" });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: name });
+    else { const a = document.createElement("a"); a.href = URL.createObjectURL(file); a.download = name; a.click(); }
+    if (confirm("Saved the notes file? Clear the notes on this iPad?")) { await tx("notes", "readwrite", (s) => s.clear()); showLibrary(); }
+  } catch (e) { /* share cancelled */ }
+};
+
+// ------------------------------------------------------------------ player
+let api = null, cur = null, sync = [], posTimer = 0, sel = null, audioUrl = null;
+const audio = $("audio");
+const atUrl = (p) => new URL("alphatab/" + p, location.href).href;
+function role(t) { const r = ROLE_COLORS.find(([re]) => re.test(t.name)); const drum = t.staves.some((s) => s.isPercussion); return drum ? ["D", "#dc2626"] : [r[1], r[2]]; }
+
+async function openSong(id) {
+  cur = await tx("songs", "readonly", (s) => s.get(id));
+  if (!cur) return;
+  $("libview").style.display = "none"; $("player").style.display = "flex";
+  $("ptitle").textContent = cur.title + (cur.variant ? ` (${cur.variant})` : "");
+  sync = cur.syncPoints || [];
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = cur.audio ? URL.createObjectURL(cur.audio) : null;
+  audio.src = audioUrl || "";
+  $("mode").value = cur.audio ? "original" : "synth";
+  $("mode").querySelector('[value="original"]').disabled = !cur.audio;
+  sel = null; renderNotes();
+  await createApi();
+}
+async function createApi() {
+  if (api) { api.destroy(); api = null; }
+  clearInterval(posTimer);
+  $("at").innerHTML = "";
+  const original = $("mode").value === "original";
+  api = new alphaTab.AlphaTabApi($("at"), {
+    core: { fontDirectory: atUrl("font/"), scriptFile: atUrl("alphaTab.min.js") },
+    display: { layoutMode: alphaTab.LayoutMode.Page, staveProfile: alphaTab.StaveProfile.ScoreTab },
+    player: { playerMode: original ? alphaTab.PlayerMode.EnabledExternalMedia : alphaTab.PlayerMode.EnabledSynthesizer,
+              soundFont: original ? null : atUrl("soundfont/sonivox.sf2"), enableCursor: true, enableUserInteraction: true,
+              scrollElement: $("main"), scrollMode: alphaTab.ScrollMode.Continuous },
+  });
+  window.at = api;
+  api.scoreLoaded.on((score) => {
+    for (const t of score.tracks) for (const s of t.staves) { if (s.isPercussion) continue; s.showStandardNotation = true; s.showTablature = !!(s.tuning && s.tuning.length); }
+    for (const sp of sync) {
+      const mb = score.masterBars[sp.bar]; if (!mb) continue;
+      const a = new alphaTab.model.Automation(); a.type = alphaTab.model.AutomationType.SyncPoint; a.ratioPosition = 0; a.value = sp.bpm || 120;
+      const d = new alphaTab.model.SyncPointData(); d.barOccurence = 0; d.millisecondOffset = sp.ms; a.syncPointValue = d;
+      mb.syncPoints = []; mb.addSyncPoint(a);
+    }
+    buildTracks(score);
+  });
+  api.renderFinished.on(() => $("pstatus").textContent = `${api.score.masterBars.length} bars`);
+  api.playerReady.on(() => { $("play").disabled = false; $("stop").disabled = false; try { api.updateSyncPoints(); } catch (e) {} applySpeed(); });
+  api.playerStateChanged.on((e) => { if (!original) $("play").textContent = e.state === 1 ? "Pause" : "Play"; });
+  api.beatMouseDown.on((beat) => {
+    try { sel = { bar: beat.voice.bar.index + 1, part: beat.voice.bar.staff.track.name }; $("notewhat").textContent = `Note on bar ${sel.bar} · ${sel.part}`; } catch (e) {}
+  });
+  api.error.on((e) => $("pstatus").textContent = "error: " + (e?.message || e));
+  if (original) hookAudio();
+  $("pstatus").textContent = "Loading…";
+  api.load(new TextEncoder().encode(cur.musicxml));
+}
+function hookAudio() {
+  const out = () => api.player && api.player.output;
+  const handler = {
+    get backingTrackDuration() { const d = audio.duration; return Number.isFinite(d) ? d * 1000 : 0; },
+    get playbackRate() { return audio.playbackRate; }, set playbackRate(v) { audio.playbackRate = v; },
+    get masterVolume() { return audio.volume; }, set masterVolume(v) { audio.volume = v; },
+    seekTo(ms) { audio.currentTime = ms / 1000; }, play() { audio.play(); }, pause() { audio.pause(); },
+  };
+  const attach = () => { if (out()) out().handler = handler; };
+  api.playerReady.on(attach); attach();
+  const tick = () => { if (out() && out().updatePosition) out().updatePosition(audio.currentTime * 1000); };
+  audio.onplay = () => { clearInterval(posTimer); api.play(); posTimer = setInterval(tick, 50); $("play").textContent = "Pause"; };
+  audio.onpause = audio.onended = () => { clearInterval(posTimer); api.pause(); $("play").textContent = "Play"; };
+  audio.onseeked = tick; audio.ontimeupdate = tick;
+}
+function applySpeed() {
+  const v = Number($("speed").value) / 100;
+  if (api) api.playbackSpeed = v;
+  audio.preservesPitch = true; audio.playbackRate = v;
+}
+function buildTracks(score) {
+  const original = $("mode").value === "original";
+  $("show").innerHTML = '<option value="all">All parts</option>' + score.tracks.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
+  $("tracks").innerHTML = score.tracks.map((t, i) => { const [l, c] = role(t); return `<div class="track" style="--tc:${c}" data-i="${i}">
+    <span><span class="tdot">${l}</span>${esc(t.name)}</span>
+    <button class="m" ${original ? "disabled" : ""}>M</button><button class="s" ${original ? "disabled" : ""}>S</button></div>`; }).join("")
+    + (original ? `<p class="muted" style="font-size:13px">Mute / solo work in Synth sound.</p>` : "");
+  document.querySelectorAll(".track button").forEach((b) => b.onclick = () => { b.classList.toggle("on"); muteSolo(); });
+}
+function muteSolo() {
+  const rows = [...document.querySelectorAll(".track")];
+  const solo = rows.some((r) => r.querySelector(".s").classList.contains("on"));
+  rows.forEach((r) => { const t = api.score.tracks[Number(r.dataset.i)];
+    const off = r.querySelector(".m").classList.contains("on") || (solo && !r.querySelector(".s").classList.contains("on"));
+    api.changeTrackMute([t], off); });
+}
+$("show").onchange = () => { const t = api.score.tracks[Number($("show").value)]; api.renderTracks(t ? [t] : api.score.tracks); };
+$("mode").onchange = () => { audio.pause(); createApi(); };
+$("speed").onchange = applySpeed;
+$("play").onclick = () => { if ($("mode").value === "original") (audio.paused ? audio.play() : audio.pause()); else api.playPause(); };
+$("stop").onclick = () => { if ($("mode").value === "original") { audio.pause(); audio.currentTime = 0; } api.stop(); };
+$("loop").onclick = (e) => { api.isLooping = !api.isLooping; e.target.classList.toggle("primary", api.isLooping); };
+$("more").onclick = () => { const o = $("panel").classList.toggle("open"); $("more").textContent = o ? "Hide" : "Controls"; };
+$("back").onclick = () => { audio.pause(); if (api) { api.destroy(); api = null; } showLibrary(); };
+
+// notes (kept here until "Send notes to the laptop")
+$("presets").innerHTML = PRESETS.map((p) => `<button data-p="${p}">${p}</button>`).join("");
+document.querySelectorAll("#presets button").forEach((b) => b.onclick = () => { const t = $("notetext"); t.value = t.value ? t.value + "; " + b.dataset.p : b.dataset.p; });
+$("notesave").onclick = async () => {
+  if (!sel) { $("notewhat").textContent = "Tap a note in the score first."; return; }
+  const text = $("notetext").value.trim(); if (!text) return;
+  await tx("notes", "readwrite", (s) => s.add({ source: cur.source, title: cur.title, bar: sel.bar, part: sel.part, text, when: new Date().toISOString() }));
+  $("notetext").value = ""; renderNotes();
+};
+async function renderNotes() {
+  const mine = (await allOf("notes")).filter((n) => cur && n.source === cur.source);
+  $("notelist").innerHTML = mine.map((n) => `<li>bar ${n.bar}${n.part ? " · " + esc(n.part) : ""}: ${esc(n.text)}</li>`).join("") || `<li class="muted">No notes yet.</li>`;
+}
+
+// ------------------------------------------------------------------ offline: the service worker keeps the app on the device
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+const onl = () => $("online").textContent = navigator.onLine ? "" : "offline";
+addEventListener("online", onl); addEventListener("offline", onl); onl();
+showLibrary();
+</script>
+</body>
+</html>
