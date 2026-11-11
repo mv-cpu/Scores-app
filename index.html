@@ -42,6 +42,9 @@
   .track button.on { background:var(--accent); color:#111; }
   .tdot { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:var(--tc);
           color:#fff; font:700 11px/1 system-ui; text-shadow:0 0 2px rgba(0,0,0,.6); margin-right:6px; }
+  #reviewlist { padding:0; margin:4px 0; } #reviewlist li { list-style:none; padding:6px 8px; margin:3px 0; border-radius:6px;
+    background:rgba(220,38,38,.08); display:flex; gap:8px; align-items:center; } #reviewlist li span.t { flex:1; }
+  #reviewlist li.done { background:none; color:var(--muted); }
   #notelist li { margin:4px 0; } #notelist { padding-left:18px; margin:4px 0; }
   .at-cursor-bar { background:rgba(245,158,11,.12); } .at-cursor-beat { background:rgba(245,158,11,.75); width:3px; }
   .at-selection div { background:rgba(56,189,248,.25); }
@@ -73,6 +76,11 @@
     </div>
     <div class="row"><span class="muted">Show</span><select id="show" style="flex:1;min-width:0"><option value="all">All parts</option></select></div>
     <div id="tracks"></div>
+    <div id="reviewbox" style="display:none">
+      <h3 style="margin:12px 0 4px">Check these bars first</h3>
+      <div id="reviewinfo" class="muted"></div>
+      <ul id="reviewlist"></ul>
+    </div>
     <div id="notebox">
       <h3 style="margin:12px 0 4px">Note for Claude</h3>
       <div id="notewhat" class="muted">Tap a note in the score first.</div>
@@ -128,7 +136,7 @@ async function addFiles(files) {
       const stems = {};                                    // the separated parts (guitar, bass, drums...) for solo / mute
       for (const [k, v] of Object.entries(p.stems || {})) stems[k] = await blob(v);
       await tx("songs", "readwrite", (s) => s.put({ id, title: p.title, variant: p.variant, source: p.source, exported: p.exported,
-        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio, stems }));
+        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio, stems, review: p.review || null }));
       n++;
     } catch (e) { $("msg").textContent = `${f.name}: ${e.message}`; }
   }
@@ -212,7 +220,7 @@ async function openSong(id) {
   media.load(cur);
   $("mode").value = media.has ? "original" : "synth";
   $("mode").querySelector('[value="original"]').disabled = !media.has;
-  sel = null; clearLoop(); renderNotes();
+  sel = null; clearLoop(); renderNotes(); renderReview();
   await createApi();
 }
 async function createApi() {
@@ -354,6 +362,35 @@ $("notesave").onclick = async () => {
   await tx("notes", "readwrite", (s) => s.add({ source: cur.source, title: cur.title, bar: sel.bar, part: sel.part, text, when: new Date().toISOString() }));
   $("notetext").value = ""; renderNotes();
 };
+// brief 166 slice C: the bars the pipeline is least sure of (worst first). Tap = loop that bar; Fine / Wrong is kept
+// with the notes and becomes an ear check on the laptop (import-notes).
+async function renderReview() {
+  const rv = cur && cur.review, bars = (rv && rv.bars) || [];
+  $("reviewbox").style.display = bars.length ? "" : "none";
+  if (!bars.length) return;
+  const said = {};
+  for (const n of await allOf("notes")) if (n.source === cur.source && n.review) said[n.bar] = n.review;
+  $("reviewinfo").textContent = `${rv.part}: ${bars.filter((b) => said[b.bar]).length} of ${bars.length} checked. Tap a bar to loop it.`;
+  $("reviewlist").innerHTML = bars.map((b) => `<li data-bar="${b.bar}" class="${said[b.bar] ? "done" : ""}">
+      <span class="t">${said[b.bar] ? (said[b.bar] === "right" ? "✓ " : "✗ ") : ""}bar ${b.bar}
+      <span class="muted">${Math.round(100 * b.confidence)}%${b.reasons.length ? " · " + esc(b.reasons[0]) : ""}</span></span>
+      <button data-v="right">Fine</button><button data-v="wrong">Wrong</button></li>`).join("");
+  document.querySelectorAll("#reviewlist li").forEach((li) => li.onclick = async (e) => {
+    const bar = Number(li.dataset.bar), v = e.target.dataset && e.target.dataset.v;
+    if (!v) { loopA = loopB = bar - 1; applyLoop(); jumpTo(bar); return; }
+    const old = (await allOf("notes")).filter((n) => n.source === cur.source && n.review && n.bar === bar);
+    await tx("notes", "readwrite", (s) => { old.forEach((n) => s.delete(n.id)); s.add({ source: cur.source, title: cur.title, bar,
+      part: rv.part, text: v === "right" ? "review: fine" : "review: wrong", review: v, when: new Date().toISOString() }); });
+    renderReview(); renderNotes();
+  });
+}
+function jumpTo(bar) {
+  const mb = api && api.score && api.score.masterBars[bar - 1];
+  if (!mb) return;
+  if ($("mode").value === "original" && sync[bar - 1]) media.currentTime = sync[bar - 1].ms / 1000; else api.tickPosition = mb.start;
+  const bb = api.renderer.boundsLookup && api.renderer.boundsLookup.findMasterBarByIndex(bar - 1);
+  if (bb) $("main").scrollTo({ top: bb.realBounds.y - 40, behavior: "smooth" });
+}
 async function renderNotes() {
   const mine = (await allOf("notes")).filter((n) => cur && n.source === cur.source);
   $("notelist").innerHTML = mine.map((n) => `<li>bar ${n.bar}${n.part ? " · " + esc(n.part) : ""}: ${esc(n.text)}</li>`).join("") || `<li class="muted">No notes yet.</li>`;
