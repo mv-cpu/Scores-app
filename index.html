@@ -70,11 +70,16 @@
   <div id="main"><div id="at"></div></div>
   <div id="panel">
     <div class="row"><span class="muted">Sound</span>
-      <select id="mode"><option value="original">Recording</option><option value="synth">Synth (score)</option></select>
+      <select id="mode"><option value="original">Recording</option><option value="synth">Synth (score)</option><option value="both">Both</option><option value="check">Check notes</option></select>
       <span class="muted">Speed</span>
       <select id="speed"><option>50</option><option>60</option><option>70</option><option>80</option><option>90</option><option selected>100</option></select>%
     </div>
+    <div class="row" id="origrow"><span class="muted">Recording</span><input type="range" id="origvol" min="0" max="100" value="100" style="flex:1">
+      <button id="origmute" title="Mute the recording (the score's instruments keep playing)">M</button></div>
+    <div class="row" id="checkrow" style="display:none"><span class="muted">Check with</span><select id="checktrack" style="flex:1;min-width:0"><option value="">nothing: the recording alone</option></select></div>
+    <div class="row" id="balrow" style="display:none"><span class="muted">score</span><input type="range" id="balance" min="0" max="100" value="50" style="flex:1"><span class="muted">recording</span></div>
     <div class="row"><span class="muted">Show</span><select id="show" style="flex:1;min-width:0"><option value="all">All parts</option></select></div>
+    <div id="trackhead" class="muted" style="font-size:13px;margin-top:6px"></div>
     <div id="tracks"></div>
     <div id="reviewbox" style="display:none">
       <h3 style="margin:12px 0 4px">Check these bars first</h3>
@@ -180,36 +185,77 @@ function role(t) { const r = ROLE_COLORS.find(([re]) => re.test(t.name)); const 
 const STEM_ROLE = { guitar: ["Guitars", "G", "#2563eb"], bass: ["Bass", "B", "#9333ea"], drums: ["Drums", "D", "#dc2626"],
                     vocals: ["Vocals", "V", "#db2777"], piano: ["Piano / keys", "K", "#64748b"], other: ["Other", "O", "#0d9488"] };
 
-// The recording plays from a GROUP of audio elements: every separated part at once (so each can be muted or soloed),
-// or the full mix when the package has no parts. The first element leads; the others follow it (re-synced when they
-// drift more than 60 ms).
+// Brief 252: the recording plays from ONE element (the full mix) unless you mute / solo a part of it; then the separated
+// parts play together instead. Followers are kept with the lead by a small speed nudge, not by jumping (six jumping
+// elements were the muddy, cutting-in-and-out sound). The level goes through a Web Audio gain (iPad ignores .volume).
+let actx = null, gainNode = null, origLevel = 1;
 const media = {
-  els: [], names: [], syncer: 0,
+  mix: null, parts: [], names: [], useParts: false, syncer: 0,
+  get els() { return this.useParts ? this.parts : (this.mix ? [this.mix] : this.parts); },
   get lead() { return this.els[0]; },
   load(c) {
-    this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.els = []; this.names = [];
-    const parts = Object.entries(c.stems || {});
-    const srcs = parts.length ? parts : (c.audio ? [["mix", c.audio]] : []);
-    for (const [name, blob] of srcs) {
-      const a = new Audio(); const u = URL.createObjectURL(blob); urls.push(u);
-      a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true;
-      this.els.push(a); this.names.push(name);
-    }
+    this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.mix = null; this.parts = []; this.names = []; this.useParts = false;
+    const make = (blob) => { const a = new Audio(); const u = URL.createObjectURL(blob); urls.push(u);
+      a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true; a._src = false; return a; };
+    if (c.audio) this.mix = make(c.audio);
+    for (const [name, blob] of Object.entries(c.stems || {})) { this.parts.push(make(blob)); this.names.push(name); }
+    actx && this.all.forEach(connectEl);
     clearInterval(this.syncer);
     this.syncer = setInterval(() => {
       const L = this.lead; if (!L || L.paused) return;
-      for (const a of this.els.slice(1)) if (Math.abs(a.currentTime - L.currentTime) > 0.06) a.currentTime = L.currentTime;
+      for (const a of this.els.slice(1)) {
+        const d = a.currentTime - L.currentTime;
+        if (Math.abs(d) > 0.3) { a.currentTime = L.currentTime; a.playbackRate = L.playbackRate; }
+        else a.playbackRate = L.playbackRate * (1 - Math.max(-0.03, Math.min(0.03, d * 0.5)));
+      }
     }, 250);
   },
-  get has() { return this.els.length > 0; },
+  get all() { return [this.mix, ...this.parts].filter(Boolean); },
+  get has() { return this.all.length > 0; },
   get paused() { return !this.lead || this.lead.paused; },
   get currentTime() { return this.lead ? this.lead.currentTime : 0; },
-  set currentTime(v) { this.els.forEach((a) => a.currentTime = v); },
+  set currentTime(v) { this.all.forEach((a) => a.currentTime = v); },
   get duration() { return this.lead ? this.lead.duration : NaN; },
-  set rate(v) { this.els.forEach((a) => { a.preservesPitch = true; a.playbackRate = v; }); },
+  set rate(v) { this.all.forEach((a) => { a.preservesPitch = true; a.playbackRate = v; }); },
   play() { const t = this.currentTime; this.els.forEach((a) => { a.currentTime = t; a.play().catch(() => {}); }); },
-  pause() { this.els.forEach((a) => a.pause()); },
+  pause() { this.all.forEach((a) => a.pause()); },
+  setUseParts(on) {                                   // switch mix <-> parts without losing the place
+    on = on && this.parts.length > 0;
+    if (on === this.useParts) return;
+    const playing = !this.paused, t = this.currentTime, oldLead = this.lead;
+    this.pause(); this.useParts = on; this.currentTime = t;
+    if (oldLead !== this.lead) { hookLead(); }
+    if (playing) this.play();
+  },
 };
+function connectEl(a) {
+  if (!actx || a._src) return;
+  try { actx.createMediaElementSource(a).connect(gainNode); a._src = true; } catch (e) {}
+}
+function audioGraph() {                     // on the first tap on Play: iPad Safari only starts audio from a tap
+  if (actx) { if (actx.state === "suspended") actx.resume(); return; }
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    gainNode = actx.createGain(); gainNode.connect(actx.destination);
+    media.all.forEach(connectEl); setOrigLevel(origLevel);
+  } catch (e) { actx = null; gainNode = null; }
+}
+function setOrigLevel(v) {
+  origLevel = v;
+  const eff = $("origmute").classList.contains("on") ? 0 : v * Number($("origvol").value) / 100;
+  if (gainNode) gainNode.gain.value = eff; else media.all.forEach((a) => a.volume = Math.max(0, Math.min(1, eff)));
+}
+const withSynth = () => ["both", "check"].includes($("mode").value);
+function audioTimeAtTick(tick) {           // where the recording should be for a synth tick (from the bar timings)
+  const mbs = api.score.masterBars;
+  let i = mbs.length - 1;
+  while (i > 0 && mbs[i].start > tick) i--;
+  const sp = sync[i], nx = sync[i + 1];
+  if (!sp) return null;
+  const len = mbs[i].calculateDuration();
+  const frac = len ? Math.min(1, Math.max(0, (tick - mbs[i].start) / len)) : 0;
+  return (sp.ms + frac * ((nx ? nx.ms : sp.ms + 60000 * 4 / (sp.bpm || 120)) - sp.ms)) / 1000;
+}
 
 async function openSong(id) {
   cur = await tx("songs", "readonly", (s) => s.get(id));
@@ -219,7 +265,7 @@ async function openSong(id) {
   sync = cur.syncPoints || [];
   media.load(cur);
   $("mode").value = media.has ? "original" : "synth";
-  $("mode").querySelector('[value="original"]').disabled = !media.has;
+  for (const v of ["original", "both", "check"]) $("mode").querySelector(`[value="${v}"]`).disabled = !media.has;
   sel = null; clearLoop(); renderNotes(); renderReview();
   await createApi();
 }
@@ -228,11 +274,12 @@ async function createApi() {
   clearInterval(posTimer);
   $("at").innerHTML = "";
   const original = $("mode").value === "original";
+  showModeRows();
   api = new alphaTab.AlphaTabApi($("at"), {
     core: { fontDirectory: atUrl("font/"), scriptFile: atUrl("alphaTab.min.js") },
     display: { layoutMode: alphaTab.LayoutMode.Page, staveProfile: alphaTab.StaveProfile.ScoreTab },
     player: { playerMode: original ? alphaTab.PlayerMode.EnabledExternalMedia : alphaTab.PlayerMode.EnabledSynthesizer,
-              soundFont: original ? null : atUrl("soundfont/sonivox.sf2"), enableCursor: true, enableUserInteraction: true,
+              soundFont: original ? null : atUrl("soundfont/sonivox.sf2"), enableCursor: true, enableUserInteraction: true,   // (Both / Check notes use the synth too)
               scrollElement: $("main"), scrollMode: alphaTab.ScrollMode.Continuous },
   });
   window.at = api;
@@ -247,8 +294,19 @@ async function createApi() {
     buildTracks(score);
   });
   api.renderFinished.on(() => $("pstatus").textContent = `${api.score.masterBars.length} bars`);
-  api.playerReady.on(() => { $("play").disabled = false; $("stop").disabled = false; try { api.updateSyncPoints(); } catch (e) {} applySpeed(); applyLoop(); });
-  api.playerStateChanged.on((e) => { if (!original) $("play").textContent = e.state === 1 ? "Pause" : "Play"; });
+  api.playerReady.on(() => { $("play").disabled = false; $("stop").disabled = false; try { api.updateSyncPoints(); } catch (e) {} applySpeed(); applyLoop(); applyLevels(); });
+  api.playerStateChanged.on((e) => {
+    if (original) return;
+    $("play").textContent = e.state === 1 ? "Pause" : "Play";
+    if (withSynth()) (e.state === 1 ? media.play() : media.pause());
+  });
+  api.playerPositionChanged.on((e) => {          // Both / Check notes: the recording follows the synth smoothly
+    if (!withSynth() || !api.score || media.paused) return;
+    const want = audioTimeAtTick(e.currentTick); if (want == null) return;
+    const diff = media.currentTime - want, base = Number($("speed").value) / 100;
+    if (Math.abs(diff) > 1) { media.currentTime = want; media.rate = base; }
+    else media.els.forEach((a) => a.playbackRate = base * (1 - Math.max(-0.03, Math.min(0.03, diff * 0.5))));
+  });
   api.beatMouseDown.on((beat) => {
     try {
       sel = { bar: beat.voice.bar.index + 1, part: beat.voice.bar.staff.track.name };
@@ -258,6 +316,7 @@ async function createApi() {
   });
   api.error.on((e) => $("pstatus").textContent = "error: " + (e?.message || e));
   if (original) hookAudio();
+  else { hookLead(); applyLevels(); }
   $("pstatus").textContent = "Loading…";
   api.load(new TextEncoder().encode(cur.musicxml));
 }
@@ -276,10 +335,33 @@ function hookAudio() {
     if (end !== null && media.currentTime * 1000 >= end) media.currentTime = loopStartMs() / 1000;   // the bar loop
     if (out() && out().updatePosition) out().updatePosition(media.currentTime * 1000);
   };
-  const L = media.lead; if (!L) return;
-  L.onplay = () => { clearInterval(posTimer); api.play(); posTimer = setInterval(tick, 40); $("play").textContent = "Pause"; };
+  window._tick = tick; hookLead();
+}
+function hookLead() {                        // the cursor follows whichever element leads (mix, or the first part)
+  media.all.forEach((a) => { a.onplay = a.onpause = a.onended = a.onseeked = a.ontimeupdate = null; });
+  const L = media.lead; if (!L || $("mode").value !== "original" || !window._tick) return;
+  L.onplay = () => { clearInterval(posTimer); api.play(); posTimer = setInterval(window._tick, 40); $("play").textContent = "Pause"; };
   L.onpause = L.onended = () => { clearInterval(posTimer); api.pause(); $("play").textContent = "Play"; };
-  L.onseeked = tick; L.ontimeupdate = tick;
+  L.onseeked = window._tick; L.ontimeupdate = window._tick;
+}
+function showModeRows() {
+  const m = $("mode").value;
+  $("origrow").style.display = media.has && m !== "synth" ? "flex" : "none";
+  $("checkrow").style.display = m === "check" ? "flex" : "none";
+  $("balrow").style.display = m === "both" ? "flex" : "none";
+}
+function applyLevels() {                     // synth vs recording levels per mode
+  if (!api) return;
+  const m = $("mode").value, b = Number($("balance").value) / 100;
+  if (m === "both") { api.masterVolume = 1 - b; setOrigLevel(b); }
+  else if (m === "check") { api.masterVolume = 0.35; setOrigLevel(1); applyCheckTrack(); }
+  else if (m === "synth") { api.masterVolume = 1; }
+  else setOrigLevel(1);
+}
+function applyCheckTrack() {                 // Check notes: the recording + at most one instrument, quietly
+  if (!api || !api.score || $("mode").value !== "check") return;
+  const pick = $("checktrack").value;
+  api.score.tracks.forEach((t, i) => api.changeTrackMute([t], String(i) !== pick));
 }
 function applySpeed() {
   const v = Number($("speed").value) / 100;
@@ -318,12 +400,18 @@ $("loop").onclick = () => {
 // ---- the parts: in Recording, mute / solo the separated parts; in Synth, mute / solo the score's tracks
 function buildTracks(score) {
   const original = $("mode").value === "original";
+  const cs = $("checktrack"), keep = cs.value;
+  cs.innerHTML = '<option value="">nothing: the recording alone</option>' + score.tracks.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
+  if ([...cs.options].some((o) => o.value === keep)) cs.value = keep;
+  $("trackhead").textContent = original ? "Parts of the recording (mute / solo):" : $("mode").value === "check" ? "" : "The score's instruments (mute / solo):";
   $("show").innerHTML = '<option value="all">All parts</option>' + score.tracks.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join("");
   if (original) {
     const parts = media.names.filter((n) => STEM_ROLE[n]);
     $("tracks").innerHTML = parts.length ? parts.map((n) => { const [label, l, c] = STEM_ROLE[n];
       return `<div class="track" style="--tc:${c}" data-stem="${n}"><span><span class="tdot">${l}</span>${label}</span><button class="m">M</button><button class="s">S</button></div>`; }).join("")
       : `<p class="muted" style="font-size:13px">This song was exported without its separated parts: mute / solo work in Synth sound. Re-export it on the laptop to get them.</p>`;
+  } else if ($("mode").value === "check") {
+    $("tracks").innerHTML = "";
   } else {
     $("tracks").innerHTML = score.tracks.map((t, i) => { const [l, c] = role(t); return `<div class="track" style="--tc:${c}" data-i="${i}">
       <span><span class="tdot">${l}</span>${esc(t.name)}</span><button class="m">M</button><button class="s">S</button></div>`; }).join("");
@@ -334,22 +422,34 @@ function muteSolo() {
   const rows = [...document.querySelectorAll(".track")];
   const solo = rows.some((r) => r.querySelector(".s").classList.contains("on"));
   const off = (r) => r.querySelector(".m").classList.contains("on") || (solo && !r.querySelector(".s").classList.contains("on"));
+  const partRows = rows.filter((r) => r.dataset.stem);
+  if (partRows.length) media.setUseParts(partRows.some(off));     // all parts on = the full mix (one clean element)
   rows.forEach((r) => {
-    if (r.dataset.stem) { const a = media.els[media.names.indexOf(r.dataset.stem)]; if (a) a.muted = off(r); }
+    if (r.dataset.stem) { const a = media.parts[media.names.indexOf(r.dataset.stem)]; if (a) a.muted = off(r); }
     else api.changeTrackMute([api.score.tracks[Number(r.dataset.i)]], off(r));
   });
 }
 $("show").onchange = () => { const t = api.score.tracks[Number($("show").value)]; api.renderTracks(t ? [t] : api.score.tracks); };
-$("mode").onchange = () => { media.pause(); createApi(); };
+$("mode").onchange = () => { media.pause(); media.setUseParts(false); createApi(); };
+$("origvol").oninput = () => setOrigLevel(origLevel);
+$("origmute").onclick = (e) => { e.target.classList.toggle("on"); e.target.classList.toggle("primary", e.target.classList.contains("on")); setOrigLevel(origLevel); };
+$("checktrack").onchange = applyCheckTrack;
+$("balance").oninput = applyLevels;
 $("speed").onchange = applySpeed;
 $("play").onclick = () => {
+  if ($("mode").value !== "synth") audioGraph();
+  if (withSynth() && api && api.playerState !== 1 && media.has) {     // the recording starts inside the tap (iPad)
+    const want = api.score ? audioTimeAtTick(api.tickPosition) : null;
+    if (want != null) media.currentTime = want;
+    media.play();
+  }
   if ($("mode").value === "original") {
     const s0 = loopStartMs(), e0 = loopEndMs(), now = media.currentTime * 1000;
     if (media.paused && s0 !== null && (now < s0 || now >= e0)) media.currentTime = s0 / 1000;   // start inside the loop
     media.paused ? media.play() : media.pause();
   } else api.playPause();
 };
-$("stop").onclick = () => { if ($("mode").value === "original") { media.pause(); media.currentTime = loopStartMs() !== null ? loopStartMs() / 1000 : 0; } api.stop(); };
+$("stop").onclick = () => { if ($("mode").value === "original") { media.pause(); media.currentTime = loopStartMs() !== null ? loopStartMs() / 1000 : 0; } api.stop(); if (withSynth()) { media.pause(); media.currentTime = sync[0] ? sync[0].ms / 1000 : 0; } };
 $("more").onclick = () => { const o = $("panel").classList.toggle("open"); $("more").textContent = o ? "Hide" : "Controls"; };
 $("back").onclick = () => { media.pause(); if (api) { api.destroy(); api = null; } showLibrary(); };
 
