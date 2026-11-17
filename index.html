@@ -64,8 +64,13 @@ function showErrs() { var p = document.getElementById("errpanel"); p.style.displ
     (ERRS.length ? ERRS.join(NL + NL) : "No errors so far.") + NL + NL + "(tap here to hide)"; }
 window.onerror = function (m, src, line, col) { ERRS.push(new Date().toLocaleTimeString() + "  " + m + "  (" + (src || "").split("/").pop() + ":" + line + ":" + col + ")"); };
 window.addEventListener("unhandledrejection", function (e) { ERRS.push(new Date().toLocaleTimeString() + "  promise: " + ((e.reason && e.reason.message) || e.reason)); });
+var OLD_BROWSER = (function () { try { new Function("var a = {}; return a?.b"); return false; } catch (e) { return true; } })();
+// old iOS Safari: open the panel by itself when something fails (a tap on plain text sends no click there)
+window.addEventListener("load", function () { setTimeout(function () { if (OLD_BROWSER && ERRS.length) showErrs(); }, 3000); });
+window.addEventListener("error", function () { if (OLD_BROWSER && document.body) setTimeout(showErrs, 50); });
 document.addEventListener("DOMContentLoaded", function () {
   var taps = 0, t = 0, h = document.querySelector("header h1");
+  if (h) { h.style.cursor = "pointer"; h.setAttribute("onclick", ""); }       // iOS: makes the title tappable
   if (h) h.addEventListener("click", function () { var n = Date.now(); taps = n - t < 600 ? taps + 1 : 1; t = n; if (taps >= 3) showErrs(); });
   document.getElementById("errpanel").addEventListener("click", function () { this.style.display = "none"; });
 });
