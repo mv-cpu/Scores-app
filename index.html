@@ -190,8 +190,17 @@ async function showLibrary() {
 }
 // status 269: iOS 12 Safari won't open a display:none picker (now only made invisible) and greys out .json files
 // with the type filter, so old Safari gets no filter (addFiles still reads only scorepacks).
-if (window.AT_FILE === "alphaTab.safari12.min.js") $("file").removeAttribute("accept");
-$("addbtn").onclick = () => $("file").click();
+// iOS 12 also ignores the button's .click() on the picker (the button flickers, nothing opens), so there the invisible
+// picker lies ON the button and your tap goes straight to it.
+const OLD_SAFARI = window.AT_FILE === "alphaTab.safari12.min.js";
+if (OLD_SAFARI) {
+  const f = $("file"), lab = f.parentNode;
+  f.removeAttribute("accept");
+  lab.style.position = "relative";
+  f.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;opacity:0;z-index:2;font-size:40px;cursor:pointer";
+} else {
+  $("addbtn").onclick = () => $("file").click();
+}
 $("file").onchange = (e) => addFiles([...e.target.files]);
 $("sendnotes").onclick = async () => {
   const notes = await allOf("notes");
