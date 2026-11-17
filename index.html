@@ -75,7 +75,8 @@ document.addEventListener("DOMContentLoaded", function () {
   <div id="library">
     <div class="row">
       <label class="primary" style="display:inline-block"><button class="primary" id="addbtn">Add song…</button>
-        <input type="file" id="file" accept=".json,application/json" multiple style="display:none"></label>
+        <input type="file" id="file" accept=".json,application/json" multiple
+               style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label>
       <button id="sendnotes">Send notes to the laptop</button>
     </div>
     <p id="msg" class="muted">Songs are kept on this device. Add a <b>.scorepack.json</b> from the Files app (e.g. Dropbox › iPad Songs).</p>
@@ -155,7 +156,8 @@ async function addFiles(files) {
   let n = 0;
   for (const f of files) {
     try {
-      const p = JSON.parse(await f.text());
+      const p = JSON.parse(f.text ? await f.text() : await new Promise((ok, bad) => {   // Safari 12: no Blob.text()
+        const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => bad(r.error); r.readAsText(f); }));
       if (p.format !== "scorepack") throw new Error("not a song package");
       const id = p.title + (p.variant ? "_" + p.variant : "");
       const blob = async (a) => (await fetch(`data:${a.mime};base64,${a.base64}`)).blob();
@@ -186,6 +188,9 @@ async function showLibrary() {
     await tx("songs", "readwrite", (s) => s.delete(b.dataset.del)); showLibrary();
   });
 }
+// status 269: iOS 12 Safari won't open a display:none picker (now only made invisible) and greys out .json files
+// with the type filter, so old Safari gets no filter (addFiles still reads only scorepacks).
+if (window.AT_FILE === "alphaTab.safari12.min.js") $("file").removeAttribute("accept");
 $("addbtn").onclick = () => $("file").click();
 $("file").onchange = (e) => addFiles([...e.target.files]);
 $("sendnotes").onclick = async () => {
