@@ -52,6 +52,24 @@
 </style>
 </head>
 <body>
+<!-- status 269: the error panel (brief 232): hidden; tap the "Scores" title 3 times to show it, then photograph it.
+     ES5 only, so it works even when the rest of the page can't run. -->
+<div id="errpanel" style="display:none;position:fixed;left:0;right:0;bottom:0;max-height:50%;overflow:auto;z-index:99;
+     background:#300;color:#fff;font:12px monospace;padding:8px;white-space:pre-wrap"></div>
+<script>
+var ERRS = [];
+function showErrs() { var p = document.getElementById("errpanel"); p.style.display = "block";
+  var NL = String.fromCharCode(10);
+  p.textContent = "Browser: " + navigator.userAgent + NL + "alphaTab file: " + (window.AT_FILE || "?") + NL + NL +
+    (ERRS.length ? ERRS.join(NL + NL) : "No errors so far.") + NL + NL + "(tap here to hide)"; }
+window.onerror = function (m, src, line, col) { ERRS.push(new Date().toLocaleTimeString() + "  " + m + "  (" + (src || "").split("/").pop() + ":" + line + ":" + col + ")"); };
+window.addEventListener("unhandledrejection", function (e) { ERRS.push(new Date().toLocaleTimeString() + "  promise: " + ((e.reason && e.reason.message) || e.reason)); });
+document.addEventListener("DOMContentLoaded", function () {
+  var taps = 0, t = 0, h = document.querySelector("header h1");
+  if (h) h.addEventListener("click", function () { var n = Date.now(); taps = n - t < 600 ? taps + 1 : 1; t = n; if (taps >= 3) showErrs(); });
+  document.getElementById("errpanel").addEventListener("click", function () { this.style.display = "none"; });
+});
+</script>
 <div id="libview">
   <header><h1>Scores</h1><span id="online" class="muted" style="font-size:12px"></span></header>
   <div id="library">
@@ -103,10 +121,14 @@
   </div>
 </div>
 
-<script src="alphatab/alphaTab.min.js"></script>
+<script>/* status 269: Safari 12 (iPad mini 3) cannot read alphaTab 1.8.4 (?. ?? static fields): it gets a copy converted for
+   Safari 12 (alphaTab.safari12.min.js, built with esbuild on Kaggle). Every newer browser keeps the original file. */
+var AT_FILE = (function () { try { new Function("var a = {}; return a?.b ?? 1"); return "alphaTab.min.js"; }
+  catch (e) { return "alphaTab.safari12.min.js"; } })();
+document.write('<script src="alphatab/' + AT_FILE + '"><\/script>');</script>
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (s) => String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ROLE_COLORS = [[/^other/i, "O", "#0d9488"], [/acoustic/i, "A", "#ea580c"], [/lead|solo/i, "L", "#16a34a"], [/harmony|second|2nd/i, "H", "#ca8a04"],
   [/bass/i, "B", "#9333ea"], [/drum|perc/i, "D", "#dc2626"], [/vocal|voice|melody/i, "V", "#db2777"],
   [/piano|keys|organ|synth/i, "K", "#64748b"], [/rhythm|guitar/i, "R", "#2563eb"], [/./, "O", "#0d9488"]];
@@ -153,7 +175,7 @@ async function showLibrary() {
   const songs = (await allOf("songs")).sort((a, b) => a.title.localeCompare(b.title));
   const notes = await allOf("notes");
   $("songs").innerHTML = songs.map((s) => `<div class="song"><div class="t" data-id="${esc(s.id)}"><b>${esc(s.title)}${s.variant ? " (" + esc(s.variant) + ")" : ""}</b>
-      <span class="muted">${Math.round(s.tempo || 0)} BPM · ${esc(s.tunings?.guitar || "")} · exported ${esc((s.exported || "").slice(0, 10))}${s.audio ? "" : " · no recording"}${s.stems && Object.keys(s.stems).length ? " · parts" : ""}</span></div>
+      <span class="muted">${Math.round(s.tempo || 0)} BPM · ${esc((s.tunings && s.tunings.guitar) || "")} · exported ${esc((s.exported || "").slice(0, 10))}${s.audio ? "" : " · no recording"}${s.stems && Object.keys(s.stems).length ? " · parts" : ""}</span></div>
       <button data-del="${esc(s.id)}" title="Remove from this device">✕</button></div>`).join("")
     || `<p class="muted">No songs yet.</p>`;
   $("sendnotes").textContent = `Send notes to the laptop (${notes.length})`;
@@ -196,7 +218,7 @@ const media = {
   load(c) {
     this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.mix = null; this.parts = []; this.names = []; this.useParts = false;
     const make = (blob) => { const a = new Audio(); const u = URL.createObjectURL(blob); urls.push(u);
-      a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true; a._src = false; return a; };
+      a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true; a.webkitPreservesPitch = true; a._src = false; return a; };
     if (c.audio) this.mix = make(c.audio);
     for (const [name, blob] of Object.entries(c.stems || {})) { this.parts.push(make(blob)); this.names.push(name); }
     actx && this.all.forEach(connectEl);
@@ -216,7 +238,7 @@ const media = {
   get currentTime() { return this.lead ? this.lead.currentTime : 0; },
   set currentTime(v) { this.all.forEach((a) => a.currentTime = v); },
   get duration() { return this.lead ? this.lead.duration : NaN; },
-  set rate(v) { this.all.forEach((a) => { a.preservesPitch = true; a.playbackRate = v; }); },
+  set rate(v) { this.all.forEach((a) => { a.preservesPitch = true; a.webkitPreservesPitch = true; a.playbackRate = v; }); },
   play() { const t = this.currentTime; this.els.forEach((a) => { a.currentTime = t; a.play().catch(() => {}); }); },
   pause() { this.all.forEach((a) => a.pause()); },
   setUseParts(on) {                                   // switch mix <-> parts without losing the place
@@ -276,7 +298,7 @@ async function createApi() {
   const original = $("mode").value === "original";
   showModeRows();
   api = new alphaTab.AlphaTabApi($("at"), {
-    core: { fontDirectory: atUrl("font/"), scriptFile: atUrl("alphaTab.min.js") },
+    core: { fontDirectory: atUrl("font/"), scriptFile: atUrl(AT_FILE) },
     display: { layoutMode: alphaTab.LayoutMode.Page, staveProfile: alphaTab.StaveProfile.ScoreTab },
     player: { playerMode: original ? alphaTab.PlayerMode.EnabledExternalMedia : alphaTab.PlayerMode.EnabledSynthesizer,
               soundFont: original ? null : atUrl("soundfont/sonivox.sf2"), enableCursor: true, enableUserInteraction: true,   // (Both / Check notes use the synth too)
@@ -314,7 +336,7 @@ async function createApi() {
       if (loopA !== null && loopB === null) { loopB = Math.max(loopA, sel.bar - 1); applyLoop(); }   // the loop's last bar
     } catch (e) {}
   });
-  api.error.on((e) => $("pstatus").textContent = "error: " + (e?.message || e));
+  api.error.on((e) => $("pstatus").textContent = "error: " + ((e && e.message) || e));
   if (original) hookAudio();
   else { hookLead(); applyLevels(); }
   $("pstatus").textContent = "Loading…";

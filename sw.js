@@ -2,9 +2,9 @@
 // The page itself is fetched fresh whenever there is a connection (so an update shows the first time the app is opened
 // online) and comes from the cache when offline; the big files (alphaTab, the sound bank, the font) come from the cache.
 // Bump CACHE when those big files change.
-const CACHE = "scores-v5";
+const CACHE = "scores-v6";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-512.png",
-  "alphatab/alphaTab.min.js", "alphatab/soundfont/sonivox.sf2",
+  "alphatab/alphaTab.min.js", "alphatab/alphaTab.safari12.min.js", "alphatab/soundfont/sonivox.sf2",
   "alphatab/font/Bravura.woff2", "alphatab/font/Bravura.woff"];
 
 self.addEventListener("install", (e) => {
