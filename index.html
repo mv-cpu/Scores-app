@@ -100,6 +100,8 @@ document.addEventListener("DOMContentLoaded", function () {
     </div>
     <div class="row" id="origrow"><span class="muted">Recording</span><input type="range" id="origvol" min="0" max="100" value="100" style="flex:1">
       <button id="origmute" title="Mute the recording (the score's instruments keep playing)">M</button></div>
+    <div class="row" id="focusrow" style="display:none"><span class="muted" id="focuslabel">Its part</span><input type="range" id="partvol" min="0" max="100" value="100" style="flex:1"></div>
+    <div class="row" id="underrow" style="display:none"><span class="muted">Recording underneath</span><input type="range" id="undervol" min="0" max="100" value="25" style="flex:1"></div>
     <div class="row" id="checkrow" style="display:none"><span class="muted">Check with</span><select id="checktrack" style="flex:1;min-width:0"><option value="">nothing: the recording alone</option></select></div>
     <div class="row" id="balrow" style="display:none"><span class="muted">score</span><input type="range" id="balance" min="0" max="100" value="50" style="flex:1"><span class="muted">recording</span></div>
     <div class="row"><span class="muted">Show</span><select id="show" style="flex:1;min-width:0"><option value="all">All parts</option></select></div>
@@ -170,7 +172,7 @@ async function addFiles(files) {
       const stems = {};                                    // the separated parts (guitar, bass, drums...) for solo / mute
       for (const [k, v] of Object.entries(p.stems || {})) stems[k] = await blob(v);
       await tx("songs", "readwrite", (s) => s.put({ id, title: p.title, variant: p.variant, source: p.source, exported: p.exported,
-        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio, stems, review: p.review || null }));
+        tempo: p.tempo, tunings: p.tunings, syncPoints: p.syncPoints, musicxml: p.musicxml, audio, stems, review: p.review || null, trackStems: p.trackStems || null }));
       n++;
     } catch (e) { $("msg").textContent = `${f.name}: ${e.message}`; }
   }
@@ -231,11 +233,13 @@ const STEM_ROLE = { guitar: ["Guitars", "G", "#2563eb"], bass: ["Bass", "B", "#9
 // elements were the muddy, cutting-in-and-out sound). The level goes through a Web Audio gain (iPad ignores .volume).
 let actx = null, gainNode = null, origLevel = 1;
 const media = {
-  mix: null, parts: [], names: [], useParts: false, syncer: 0,
-  get els() { return this.useParts ? this.parts : (this.mix ? [this.mix] : this.parts); },
+  mix: null, parts: [], names: [], useParts: false, syncer: 0, focus: null,
+  get focusEl() { return this.focus ? this.parts[this.names.indexOf(this.focus)] || null : null; },
+  get els() { if (this.focusEl) return [this.mix, this.focusEl].filter(Boolean);     // brief 278 B1: one track's own stem
+    return this.useParts ? this.parts : (this.mix ? [this.mix] : this.parts); },
   get lead() { return this.els[0]; },
   load(c) {
-    this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.mix = null; this.parts = []; this.names = []; this.useParts = false;
+    this.pause(); urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; this.mix = null; this.parts = []; this.names = []; this.useParts = false; this.focus = null;
     const make = (blob) => { const a = new Audio(); const u = URL.createObjectURL(blob); urls.push(u);
       a.src = u; a.preload = "auto"; a.playsInline = true; a.preservesPitch = true; a.webkitPreservesPitch = true; a._src = false; return a; };
     if (c.audio) this.mix = make(c.audio);
@@ -260,6 +264,16 @@ const media = {
   set rate(v) { this.all.forEach((a) => { a.preservesPitch = true; a.webkitPreservesPitch = true; a.playbackRate = v; }); },
   play() { const t = this.currentTime; this.els.forEach((a) => { a.currentTime = t; a.play().catch(() => {}); }); },
   pause() { this.all.forEach((a) => a.pause()); },
+  setFocus(name) {                                    // brief 278 B1: a track's own stem over the recording (null = off)
+    name = name && this.names.includes(name) ? name : null;
+    if (name === this.focus) return;
+    const playing = !this.paused, t = this.currentTime, oldLead = this.lead;
+    this.pause(); this.focus = name; if (name) this.useParts = false;
+    this.parts.forEach((a) => a.muted = false); this.currentTime = t;
+    if (oldLead !== this.lead) { hookLead(); }
+    applyElLevels();
+    if (playing) this.play();
+  },
   setUseParts(on) {                                   // switch mix <-> parts without losing the place
     on = on && this.parts.length > 0;
     if (on === this.useParts) return;
@@ -271,7 +285,7 @@ const media = {
 };
 function connectEl(a) {
   if (!actx || a._src) return;
-  try { actx.createMediaElementSource(a).connect(gainNode); a._src = true; } catch (e) {}
+  try { a._g = actx.createGain(); actx.createMediaElementSource(a).connect(a._g); a._g.connect(gainNode); a._src = true; applyElLevels(); } catch (e) {}
 }
 function audioGraph() {                     // on the first tap on Play: iPad Safari only starts audio from a tap
   if (actx) { if (actx.state === "suspended") actx.resume(); return; }
@@ -284,7 +298,28 @@ function audioGraph() {                     // on the first tap on Play: iPad Sa
 function setOrigLevel(v) {
   origLevel = v;
   const eff = $("origmute").classList.contains("on") ? 0 : v * Number($("origvol").value) / 100;
-  if (gainNode) gainNode.gain.value = eff; else media.all.forEach((a) => a.volume = Math.max(0, Math.min(1, eff)));
+  if (gainNode) gainNode.gain.value = eff; else media.all.forEach((a) => a.volume = Math.max(0, Math.min(1, eff * elLevel(a))));
+}
+function elLevel(a) {                       // each element's own level: in a track's view, its stem and the recording under it
+  if (!media.focusEl) return 1;
+  if (a === media.focusEl) return Number($("partvol").value) / 100;
+  if (a === media.mix) return Number($("undervol").value) / 100;
+  return 1;
+}
+function applyElLevels() {
+  media.all.forEach((a) => { if (a._g) a._g.gain.value = elLevel(a); });
+  if (!gainNode) setOrigLevel(origLevel);
+}
+const STEM_LABEL = (k) => k.startsWith("suno:") ? "Suno's own " + k.slice(5).replace(/_/g, " ").toLowerCase() + " stem" : "the separated " + k + " part";
+function updateFocus() {                     // Show one track in Recording sound: hear that track's own stem
+  const t = api && api.score ? api.score.tracks[Number($("show").value)] : null;
+  const key = t && $("mode").value === "original" && cur && cur.trackStems ? cur.trackStems[t.name.replace(/\s+/g, " ")] : null;   // alphaTab names use non-breaking spaces
+  media.setFocus(key || null);
+  const on = !!media.focus;
+  $("focusrow").style.display = $("underrow").style.display = on ? "" : "none";
+  if (on) $("focuslabel").textContent = `${t.name}: ${STEM_LABEL(media.focus)}`;
+  $("tracks").style.display = on ? "none" : "";
+  $("trackhead").style.display = on ? "none" : "";
 }
 const withSynth = () => ["both", "check"].includes($("mode").value);
 function audioTimeAtTick(tick) {           // where the recording should be for a synth tick (from the bar timings)
@@ -458,20 +493,23 @@ function buildTracks(score) {
       <span><span class="tdot">${l}</span>${esc(t.name)}</span><button class="m">M</button><button class="s">S</button></div>`; }).join("");
   }
   document.querySelectorAll(".track button").forEach((b) => b.onclick = () => { b.classList.toggle("on"); muteSolo(); });
+  updateFocus();                             // a new score shows all parts: no track's own stem
 }
 function muteSolo() {
   const rows = [...document.querySelectorAll(".track")];
   const solo = rows.some((r) => r.querySelector(".s").classList.contains("on"));
   const off = (r) => r.querySelector(".m").classList.contains("on") || (solo && !r.querySelector(".s").classList.contains("on"));
   const partRows = rows.filter((r) => r.dataset.stem);
-  if (partRows.length) media.setUseParts(partRows.some(off));     // all parts on = the full mix (one clean element)
+  if (partRows.length && !media.focus) media.setUseParts(partRows.some(off));     // all parts on = the full mix (one clean element)
   rows.forEach((r) => {
     if (r.dataset.stem) { const a = media.parts[media.names.indexOf(r.dataset.stem)]; if (a) a.muted = off(r); }
     else api.changeTrackMute([api.score.tracks[Number(r.dataset.i)]], off(r));
   });
 }
-$("show").onchange = () => { const t = api.score.tracks[Number($("show").value)]; api.renderTracks(t ? [t] : api.score.tracks); };
-$("mode").onchange = () => { media.pause(); media.setUseParts(false); createApi(); };
+$("show").onchange = () => { const t = api.score.tracks[Number($("show").value)]; api.renderTracks(t ? [t] : api.score.tracks); updateFocus(); };
+$("partvol").oninput = applyElLevels;
+$("undervol").oninput = applyElLevels;
+$("mode").onchange = () => { media.pause(); media.setFocus(null); media.setUseParts(false); $("show").value = "all"; updateFocus(); createApi(); };
 $("origvol").oninput = () => setOrigLevel(origLevel);
 $("origmute").onclick = (e) => { e.target.classList.toggle("on"); e.target.classList.toggle("primary", e.target.classList.contains("on")); setOrigLevel(origLevel); };
 $("checktrack").onchange = applyCheckTrack;
